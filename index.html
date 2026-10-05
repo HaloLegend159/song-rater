@@ -1,0 +1,364 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Song Rater</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: Segoe UI, Roboto, Arial, sans-serif; background: #121212; color: #fff; padding-bottom: 76px; }
+  a { color: #ffcc33; text-decoration: none; }
+  header { display: flex; align-items: center; gap: 8px; padding: 12px 16px; background: #1c1c1c; border-bottom: 1px solid #2c2c2c; position: sticky; top: 0; z-index: 5; }
+  header b { font-size: 18px; flex: 1; }
+  header .who { color: #aaa; font-size: 13px; }
+  nav { position: fixed; bottom: 0; left: 0; right: 0; display: flex; background: #1c1c1c; border-top: 1px solid #2c2c2c; z-index: 5; }
+  nav a { flex: 1; text-align: center; padding: 14px 4px calc(14px + env(safe-area-inset-bottom)); color: #aaa; font-size: 14px; }
+  nav a.on { color: #fff; font-weight: 600; }
+  main { max-width: 720px; margin: 0 auto; padding: 16px; }
+  h2 { font-size: 20px; margin: 8px 0 14px; }
+  .card { background: #1c1c1c; border: 1px solid #2c2c2c; border-radius: 14px; padding: 14px 16px; margin-bottom: 12px; }
+  .t { font-size: 17px; font-weight: 600; word-break: break-word; }
+  .a { color: #aaa; font-size: 14px; }
+  .note { color: #e6d59a; font-size: 14px; margin-top: 8px; white-space: pre-wrap; word-break: break-word; }
+  .meta { color: #777; font-size: 12px; margin-top: 8px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .stars { margin: 6px 0 0; white-space: nowrap; }
+  .star { background: none; border: 0; font-size: 26px; color: #444; padding: 0 2px; line-height: 1; cursor: default; }
+  .star.on { color: #ffcc33; }
+  .edit .star { font-size: 40px; cursor: pointer; }
+  .btn { background: #333; color: #fff; border: 0; border-radius: 18px; padding: 9px 16px; font-size: 14px; cursor: pointer; }
+  .btn.primary { background: #ffcc33; color: #000; font-weight: 600; }
+  .btn.small { padding: 5px 12px; font-size: 12px; }
+  .btn:disabled { opacity: .5; }
+  input, textarea, select { width: 100%; background: #121212; color: #fff; border: 1px solid #3a3a3a; border-radius: 10px; padding: 12px; font: inherit; font-size: 16px; margin-bottom: 10px; }
+  label { display: block; font-size: 13px; color: #aaa; margin-bottom: 4px; }
+  .rowx { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .rowx > input, .rowx > select { flex: 1; min-width: 140px; margin-bottom: 0; }
+  .msg { color: #ff8a80; font-size: 14px; min-height: 20px; margin: 6px 0; }
+  .ok { color: #9be79b; }
+  .empty { color: #777; text-align: center; padding: 36px 12px; }
+  .setup { background: #3a2a00; border: 1px solid #806000; border-radius: 12px; padding: 16px; }
+</style>
+</head>
+<body>
+<header><b>Song Rater</b><span class="who" id="who"></span><button class="btn small" id="signout" hidden>Sign out</button></header>
+<main id="main"></main>
+<nav>
+  <a href="#/feed" data-tab="feed">Feed</a>
+  <a href="#/add" data-tab="add">Rate a song</a>
+  <a href="#/me" data-tab="me">My ratings</a>
+</nav>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import { getAuth, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, sendPasswordResetEmail }
+  from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import { getFirestore, doc, getDoc, setDoc, deleteDoc, collection, query, where, orderBy, limit, getDocs, writeBatch }
+  from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+// ============================================================
+// PASTE YOUR FIREBASE CONFIG HERE (see SETUP.md, step 4)
+// ============================================================
+const firebaseConfig = {
+  apiKey: "AIzaSyD2hj70ZzfIblECztekrTxzXhIzNiWPtEM",
+  authDomain: "song-rater-73a9e.firebaseapp.com",
+  projectId: "song-rater-73a9e",
+  appId: "1:760768786524:web:e7343b9e6de35a14893699"
+};
+// ============================================================
+
+const MAX = 5;
+const main = document.getElementById('main');
+let auth, db, me = null;          // me = { uid, username }
+let prefill = null;               // song handed to the "Rate a song" form
+
+// ---------- helpers ----------
+function el(tag, props, kids) {
+  const n = document.createElement(tag);
+  for (const k in (props || {})) {
+    if (k === 'class') n.className = props[k];
+    else if (k === 'text') n.textContent = props[k];
+    else if (k.startsWith('on')) n.addEventListener(k.slice(2), props[k]);
+    else n.setAttribute(k, props[k]);
+  }
+  (kids || []).forEach(c => c && n.appendChild(c));
+  return n;
+}
+const keyOf = (t, a) => (t + '|' + a).toLowerCase().trim();
+function hash(s) {
+  let h1 = 5381, h2 = 52711;
+  for (let i = 0; i < s.length; i++) { const c = s.charCodeAt(i); h1 = (h1 * 33) ^ c; h2 = (h2 * 33) ^ c; }
+  return (h1 >>> 0).toString(16) + (h2 >>> 0).toString(16);
+}
+const ratingId = (uid, key) => uid + '_' + hash(key);
+function stars(current, onPick) {
+  const w = el('div', { class: 'stars' + (onPick ? ' edit' : '') });
+  for (let i = 1; i <= MAX; i++) {
+    const b = el('button', { class: 'star' + (i <= current ? ' on' : ''), text: '★', type: 'button', 'aria-label': i + ' of ' + MAX });
+    if (onPick) b.addEventListener('click', () => onPick(i));
+    w.appendChild(b);
+  }
+  return w;
+}
+function show(...nodes) { main.replaceChildren(...nodes); }
+function loading() { show(el('div', { class: 'empty', text: 'Loading...' })); }
+function friendly(e) {
+  const c = (e && e.code) || '';
+  if (c.includes('email-already-in-use')) return 'That email already has an account. Try signing in.';
+  if (c.includes('invalid-credential') || c.includes('wrong-password') || c.includes('user-not-found')) return 'Email or password is incorrect.';
+  if (c.includes('weak-password')) return 'Password must be at least 6 characters.';
+  if (c.includes('invalid-email')) return 'That email address does not look right.';
+  if (c.includes('permission-denied')) return 'Permission denied. Check that the database rules from SETUP.md are published.';
+  return (e && e.message) || 'Something went wrong.';
+}
+
+// ---------- data ----------
+async function saveRating(song, rating, note) {
+  const key = keyOf(song.title, song.artist);
+  await setDoc(doc(db, 'ratings', ratingId(me.uid, key)), {
+    uid: me.uid, username: me.username, key,
+    title: song.title.trim().slice(0, 200), artist: song.artist.trim().slice(0, 200),
+    rating, note: (note || '').slice(0, 1000), updatedAt: Date.now()
+  });
+}
+async function ratingsOf(uid) {
+  const snap = await getDocs(query(collection(db, 'ratings'), where('uid', '==', uid)));
+  return snap.docs.map(d => d.data()).sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+// ---------- rating card ----------
+function card(r, opts) {
+  const mine = me && r.uid === me.uid;
+  const meta = el('div', { class: 'meta' }, [
+    el('a', { href: '#/u/' + encodeURIComponent(r.username), text: '@' + r.username }),
+    el('span', { text: new Date(r.updatedAt).toLocaleDateString() })
+  ]);
+  if (mine) {
+    meta.appendChild(el('button', { class: 'btn small', text: 'Edit', onclick: () => { prefill = r; location.hash = '#/add'; if (location.hash === '#/add') route(); } }));
+    meta.appendChild(el('button', { class: 'btn small', text: 'Delete', onclick: async () => {
+      if (!confirm('Delete your rating for "' + r.title + '"?')) return;
+      await deleteDoc(doc(db, 'ratings', ratingId(me.uid, r.key))); route();
+    } }));
+  } else {
+    meta.appendChild(el('button', { class: 'btn small', text: 'Rate this too', onclick: () => {
+      prefill = { title: r.title, artist: r.artist }; location.hash = '#/add';
+    } }));
+  }
+  return el('div', { class: 'card' }, [
+    el('div', { class: 't', text: r.title }),
+    el('div', { class: 'a', text: r.artist }),
+    r.rating ? stars(r.rating) : el('div', { class: 'a', text: 'Note only, no rating' }),
+    r.note ? el('div', { class: 'note', text: r.note }) : null,
+    meta
+  ]);
+}
+function listWithSearch(items, emptyText) {
+  const box = el('div');
+  const search = el('input', { placeholder: 'Search songs, artists, notes...' });
+  const sort = el('select', {}, [
+    el('option', { value: 'recent', text: 'Most recent' }),
+    el('option', { value: 'high', text: 'Highest rated' }),
+    el('option', { value: 'low', text: 'Lowest rated' }),
+    el('option', { value: 'title', text: 'Title A-Z' }),
+    el('option', { value: 'artist', text: 'Artist A-Z' })
+  ]);
+  function draw() {
+    const q = search.value.toLowerCase(), s = sort.value;
+    let list = items.filter(r => !q || (r.title + ' ' + r.artist + ' ' + r.note + ' ' + r.username).toLowerCase().includes(q));
+    list = list.slice().sort((a, b) =>
+      s === 'high' ? b.rating - a.rating : s === 'low' ? a.rating - b.rating :
+      s === 'title' ? a.title.localeCompare(b.title) : s === 'artist' ? a.artist.localeCompare(b.artist) :
+      b.updatedAt - a.updatedAt);
+    box.replaceChildren(...(list.length ? list.map(r => card(r)) : [el('div', { class: 'empty', text: q ? 'No matches.' : emptyText })]));
+  }
+  search.addEventListener('input', draw); sort.addEventListener('change', draw); draw();
+  return [el('div', { class: 'rowx', style: 'margin-bottom:12px' }, [search, sort]), box];
+}
+
+// ---------- views ----------
+async function viewFeed() {
+  loading();
+  const snap = await getDocs(query(collection(db, 'ratings'), orderBy('updatedAt', 'desc'), limit(100)));
+  const items = snap.docs.map(d => d.data());
+  const find = el('input', { placeholder: 'Find a person by username' });
+  const go = el('button', { class: 'btn', text: 'View', onclick: () => { const v = find.value.trim().replace(/^@/, ''); if (v) location.hash = '#/u/' + encodeURIComponent(v); } });
+  show(el('h2', { text: 'Latest ratings from everyone' }),
+       el('div', { class: 'rowx', style: 'margin-bottom:12px' }, [find, go]),
+       ...listWithSearch(items, 'No ratings yet. Be the first!'));
+}
+
+async function viewMe() {
+  if (!me) return viewAuth();
+  loading();
+  const items = await ratingsOf(me.uid);
+  const msg = el('div', { class: 'msg' });
+  const file = el('input', { type: 'file', accept: '.json', hidden: '' });
+  file.addEventListener('change', async () => {
+    try {
+      const data = JSON.parse(await file.files[0].text());
+      const songs = Object.values(data).filter(s => s && s.title);
+      for (let i = 0; i < songs.length; i += 400) {
+        const batch = writeBatch(db);
+        songs.slice(i, i + 400).forEach(s => {
+          const artist = s.artist || '', key = keyOf(s.title, artist);
+          batch.set(doc(db, 'ratings', ratingId(me.uid, key)), {
+            uid: me.uid, username: me.username, key, title: String(s.title).slice(0, 200), artist: String(artist).slice(0, 200),
+            rating: Math.max(0, Math.min(MAX, parseInt(s.rating) || 0)), note: String(s.note || '').slice(0, 1000),
+            updatedAt: Number(s.ratedAt) || Date.now()
+          });
+        });
+        await batch.commit();
+      }
+      route();
+    } catch (e) { msg.textContent = 'Import failed: ' + friendly(e); }
+  });
+  const link = location.origin + location.pathname + '#/u/' + encodeURIComponent(me.username);
+  show(el('h2', { text: 'My ratings (' + items.length + ')' }),
+       el('div', { class: 'rowx', style: 'margin-bottom:12px' }, [
+         el('button', { class: 'btn', text: 'Copy my profile link', onclick: async () => { await navigator.clipboard.writeText(link); msg.className = 'msg ok'; msg.textContent = 'Link copied.'; } }),
+         el('button', { class: 'btn', text: 'Import from PC Song Rater', onclick: () => file.click() }), file
+       ]), msg,
+       ...listWithSearch(items, 'You have not rated anything yet.'));
+}
+
+async function viewUser(name) {
+  loading();
+  const u = await getDoc(doc(db, 'usernames', name.toLowerCase()));
+  if (!u.exists()) return show(el('div', { class: 'empty', text: 'No user named @' + name + '.' }));
+  const items = await ratingsOf(u.data().uid);
+  show(el('h2', { text: '@' + (items[0] ? items[0].username : name) + ' (' + items.length + ' songs)' }),
+       ...listWithSearch(items, 'No ratings yet.'));
+}
+
+function viewAdd() {
+  if (!me) return viewAuth();
+  const p = prefill || {}; prefill = null;
+  let rating = p.rating || 0;
+  const title = el('input', { placeholder: 'Song title', maxlength: '200', value: p.title || '' });
+  const artist = el('input', { placeholder: 'Artist', maxlength: '200', value: p.artist || '' });
+  const note = el('textarea', { rows: '4', placeholder: 'Add a note (optional). Notes are public.', maxlength: '1000' });
+  note.value = p.note || '';
+  const starBox = el('div');
+  const drawStars = () => starBox.replaceChildren(stars(rating, n => { rating = (rating === n ? 0 : n); drawStars(); }));
+  drawStars();
+  const msg = el('div', { class: 'msg' });
+  const btn = el('button', { class: 'btn primary', text: 'Save', onclick: async () => {
+    if (!title.value.trim() || !artist.value.trim()) { msg.className = 'msg'; msg.textContent = 'Enter the song title and artist.'; return; }
+    if (!rating && !note.value.trim()) { msg.className = 'msg'; msg.textContent = 'Pick a star rating or write a note.'; return; }
+    btn.disabled = true;
+    try {
+      await saveRating({ title: title.value, artist: artist.value }, rating, note.value);
+      msg.className = 'msg ok'; msg.textContent = 'Saved.';
+      title.value = ''; artist.value = ''; note.value = ''; rating = 0; drawStars();
+    } catch (e) { msg.className = 'msg'; msg.textContent = friendly(e); }
+    btn.disabled = false;
+  } });
+  show(el('h2', { text: 'Rate a song' }),
+       el('div', { class: 'card' }, [
+         el('label', { text: 'Title' }), title, el('label', { text: 'Artist' }), artist,
+         el('label', { text: 'Your rating' }), starBox, el('div', { style: 'height:12px' }),
+         el('label', { text: 'Note' }), note, btn, msg
+       ]));
+}
+
+function viewAuth() {
+  let signup = false;
+  const username = el('input', { placeholder: 'Username (letters, numbers, _)', maxlength: '20', autocomplete: 'username' });
+  const email = el('input', { type: 'email', placeholder: 'Email', autocomplete: 'email' });
+  const pass = el('input', { type: 'password', placeholder: 'Password', autocomplete: 'current-password' });
+  const msg = el('div', { class: 'msg' });
+  const go = el('button', { class: 'btn primary' });
+  const swap = el('button', { class: 'btn' });
+  const reset = el('button', { class: 'btn', text: 'Forgot password', onclick: async () => {
+    if (!email.value) { msg.textContent = 'Type your email first.'; return; }
+    try { await sendPasswordResetEmail(auth, email.value); msg.className = 'msg ok'; msg.textContent = 'Reset email sent.'; }
+    catch (e) { msg.className = 'msg'; msg.textContent = friendly(e); }
+  } });
+  const heading = el('h2');
+  function draw() {
+    heading.textContent = signup ? 'Create an account' : 'Sign in';
+    username.hidden = !signup; go.textContent = signup ? 'Sign up' : 'Sign in';
+    swap.textContent = signup ? 'I already have an account' : 'Create an account'; reset.hidden = signup;
+  }
+  swap.addEventListener('click', () => { signup = !signup; msg.textContent = ''; draw(); });
+  go.addEventListener('click', async () => {
+    msg.className = 'msg'; msg.textContent = ''; go.disabled = true;
+    try {
+      if (signup) {
+        const name = username.value.trim();
+        if (!/^[A-Za-z0-9_]{3,20}$/.test(name)) throw { message: 'Username must be 3-20 letters, numbers or underscores.' };
+        if ((await getDoc(doc(db, 'usernames', name.toLowerCase()))).exists()) throw { message: 'That username is taken.' };
+        pendingName = name;
+        await createUserWithEmailAndPassword(auth, email.value, pass.value);
+      } else {
+        await signInWithEmailAndPassword(auth, email.value, pass.value);
+      }
+    } catch (e) { pendingName = null; msg.textContent = friendly(e); }
+    go.disabled = false;
+  });
+  draw();
+  show(heading, el('div', { class: 'card' }, [username, email, pass, el('div', { class: 'rowx' }, [go, swap, reset]), msg]));
+}
+
+// Shown if someone has an account but no username yet (e.g. sign-up was interrupted).
+function viewPickName() {
+  const username = el('input', { placeholder: 'Username (letters, numbers, _)', maxlength: '20' });
+  const msg = el('div', { class: 'msg' });
+  show(el('h2', { text: 'Choose a username' }), el('div', { class: 'card' }, [username,
+    el('button', { class: 'btn primary', text: 'Save', onclick: async () => {
+      const name = username.value.trim();
+      if (!/^[A-Za-z0-9_]{3,20}$/.test(name)) { msg.textContent = 'Username must be 3-20 letters, numbers or underscores.'; return; }
+      try {
+        if ((await getDoc(doc(db, 'usernames', name.toLowerCase()))).exists()) { msg.textContent = 'That username is taken.'; return; }
+        await claimName(auth.currentUser.uid, name); route();
+      } catch (e) { msg.textContent = friendly(e); }
+    } }), msg]));
+}
+
+// ---------- account plumbing ----------
+let pendingName = null, needsName = false;
+async function claimName(uid, name) {
+  await setDoc(doc(db, 'usernames', name.toLowerCase()), { uid });
+  await setDoc(doc(db, 'users', uid), { username: name, createdAt: Date.now() });
+  me = { uid, username: name }; needsName = false; header();
+}
+function header() {
+  document.getElementById('who').textContent = me ? '@' + me.username : '';
+  document.getElementById('signout').hidden = !auth.currentUser;
+}
+
+// ---------- router ----------
+function route() {
+  const h = location.hash || '#/feed';
+  const tab = h.startsWith('#/add') ? 'add' : h.startsWith('#/me') ? 'me' : h.startsWith('#/u/') ? '' : 'feed';
+  document.querySelectorAll('nav a').forEach(a => a.classList.toggle('on', a.dataset.tab === tab));
+  if (needsName) return viewPickName();
+  const run = h.startsWith('#/u/') ? viewUser(decodeURIComponent(h.slice(4)))
+    : tab === 'add' ? viewAdd() : tab === 'me' ? viewMe() : viewFeed();
+  Promise.resolve(run).catch(e => show(el('div', { class: 'empty', text: friendly(e) })));
+}
+
+// ---------- start ----------
+if (firebaseConfig.apiKey === 'PASTE_HERE') {
+  show(el('div', { class: 'setup', text: 'Almost there: open index.html and paste your Firebase config near the top of the script (SETUP.md, step 4).' }));
+} else {
+  const app = initializeApp(firebaseConfig);
+  auth = getAuth(app); db = getFirestore(app);
+  document.getElementById('signout').addEventListener('click', () => signOut(auth));
+  onAuthStateChanged(auth, async user => {
+    me = null; needsName = false;
+    if (user) {
+      try {
+        if (pendingName) { const n = pendingName; pendingName = null; await claimName(user.uid, n); }
+        else {
+          const u = await getDoc(doc(db, 'users', user.uid));
+          if (u.exists()) me = { uid: user.uid, username: u.data().username }; else needsName = true;
+        }
+      } catch (e) { needsName = true; }
+    }
+    header(); route();
+  });
+  window.addEventListener('hashchange', route);
+}
+</script>
+</body>
+</html>
