@@ -36,6 +36,22 @@
   .msg { color: #ff8a80; font-size: 14px; min-height: 20px; margin: 6px 0; }
   .ok { color: #9be79b; }
   .empty { color: #777; text-align: center; padding: 36px 12px; }
+  .sugg { margin: -4px 0 10px; }
+  .head { display: flex; gap: 12px; align-items: center; }
+  .head img { width: 56px; height: 56px; border-radius: 8px; flex: none; }
+  .head > div { min-width: 0; }
+  .sugg img { width: 36px; height: 36px; border-radius: 6px; flex: none; }
+  .sugg button { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; background: #262626; color: #fff; border: 0; border-bottom: 1px solid #333; padding: 10px 12px; font-size: 14px; cursor: pointer; }
+  .sugg button:first-child { border-radius: 10px 10px 0 0; } .sugg button:last-child { border-radius: 0 0 10px 10px; border-bottom: 0; }
+  .sugg button:only-child { border-radius: 10px; }
+  .sugg small { color: #aaa; }
+  .center { text-align: center; }
+  .art { display: block; margin: 14px auto; width: min(240px, 70vw); aspect-ratio: 1; object-fit: cover; border-radius: 12px; background: #000; }
+  .t.big { font-size: 24px; }
+  .ctl { display: flex; justify-content: center; align-items: center; gap: 14px; margin: 14px 0; }
+  .cbtn { width: 48px; height: 48px; border-radius: 50%; border: 0; background: #2a2a2a; color: #fff; font-size: 20px; cursor: pointer; }
+  .cbtn.big { width: 60px; height: 60px; font-size: 24px; background: #fff; color: #000; }
+  .center textarea { margin-top: 12px; }
   .setup { background: #3a2a00; border: 1px solid #806000; border-radius: 12px; padding: 16px; }
 </style>
 </head>
@@ -43,6 +59,7 @@
 <header><b>Song Rater</b><span class="who" id="who"></span><button class="btn small" id="signout" hidden>Sign out</button></header>
 <main id="main"></main>
 <nav>
+  <a href="#/now" data-tab="now" id="navNow" hidden>Now playing</a>
   <a href="#/feed" data-tab="feed">Feed</a>
   <a href="#/add" data-tab="add">Rate a song</a>
   <a href="#/me" data-tab="me">My ratings</a>
@@ -62,7 +79,10 @@ const firebaseConfig = {
   apiKey: "AIzaSyD2hj70ZzfIblECztekrTxzXhIzNiWPtEM",
   authDomain: "song-rater-73a9e.firebaseapp.com",
   projectId: "song-rater-73a9e",
-  appId: "1:760768786524:web:e7343b9e6de35a14893699"
+  storageBucket: "song-rater-73a9e.firebasestorage.app",
+  messagingSenderId: "760768786524",
+  appId: "1:760768786524:web:e7343b9e6de35a14893699",
+  measurementId: "G-ESHPPGW8DL"
 };
 // ============================================================
 
@@ -115,10 +135,11 @@ function friendly(e) {
 async function saveRating(song, rating, note) {
   const key = keyOf(song.title, song.artist);
   await setDoc(doc(db, 'ratings', ratingId(me.uid, key)), {
-    uid: me.uid, username: me.username, key,
+    uid: me.uid, username: me.username, key, titleLower: song.title.trim().toLowerCase().slice(0, 200),
     title: song.title.trim().slice(0, 200), artist: song.artist.trim().slice(0, 200),
-    rating, note: (note || '').slice(0, 1000), updatedAt: Date.now()
-  });
+    rating, note: (note || '').slice(0, 1000), updatedAt: Date.now(),
+    ...(song.art ? { art: song.art.slice(0, 500) } : {})
+  }, { merge: true });
 }
 async function ratingsOf(uid) {
   const snap = await getDocs(query(collection(db, 'ratings'), where('uid', '==', uid)));
@@ -144,8 +165,10 @@ function card(r, opts) {
     } }));
   }
   return el('div', { class: 'card' }, [
-    el('div', { class: 't', text: r.title }),
-    el('div', { class: 'a', text: r.artist }),
+    el('div', { class: 'head' }, [
+      safeArt(r.art) ? el('img', { src: safeArt(r.art), alt: '', loading: 'lazy' }) : null,
+      el('div', {}, [el('div', { class: 't', text: r.title }), el('div', { class: 'a', text: r.artist })])
+    ]),
     r.rating ? stars(r.rating) : el('div', { class: 'a', text: 'Note only, no rating' }),
     r.note ? el('div', { class: 'note', text: r.note }) : null,
     meta
@@ -201,7 +224,7 @@ async function viewMe() {
         songs.slice(i, i + 400).forEach(s => {
           const artist = s.artist || '', key = keyOf(s.title, artist);
           batch.set(doc(db, 'ratings', ratingId(me.uid, key)), {
-            uid: me.uid, username: me.username, key, title: String(s.title).slice(0, 200), artist: String(artist).slice(0, 200),
+            uid: me.uid, username: me.username, key, titleLower: String(s.title).trim().toLowerCase().slice(0, 200), title: String(s.title).slice(0, 200), artist: String(artist).slice(0, 200),
             rating: Math.max(0, Math.min(MAX, parseInt(s.rating) || 0)), note: String(s.note || '').slice(0, 1000),
             updatedAt: Number(s.ratedAt) || Date.now()
           });
@@ -235,6 +258,29 @@ function viewAdd() {
   let rating = p.rating || 0;
   const title = el('input', { placeholder: 'Song title', maxlength: '200', value: p.title || '' });
   const artist = el('input', { placeholder: 'Artist', maxlength: '200', value: p.artist || '' });
+  const sugg = el('div', { class: 'sugg' });
+  let suggTimer = null, art = p.art || '';
+  title.addEventListener('input', () => {
+    clearTimeout(suggTimer); art = '';
+    suggTimer = setTimeout(async () => {
+      const q = title.value;
+      const [rated, songs] = await Promise.all([suggest(q).catch(() => []), catalog(q)]);
+      if (q !== title.value) return;
+      // Already-rated songs first, then catalog songs that are not already listed.
+      const seen = new Set(rated.map(s => keyOf(s.title, s.artist)));
+      const found = rated.concat(songs.filter(s => { const k = keyOf(s.title, s.artist); if (seen.has(k)) return false; seen.add(k); return true; })).slice(0, 10);
+      sugg.replaceChildren(...found.map(s => {
+        const pic = safeArt(s.art);
+        const info = s.n ? '  ★ ' + (s.sum / s.n).toFixed(1) + ' (' + s.n + ')' : s.rated ? '  rated' : '';
+        const b = el('button', { type: 'button' }, [
+          pic ? el('img', { src: pic, alt: '' }) : null,
+          el('span', {}, [document.createTextNode(s.title + ' '), el('small', { text: '- ' + s.artist + info })])
+        ]);
+        b.addEventListener('click', () => { title.value = s.title; artist.value = s.artist; art = pic; sugg.replaceChildren(); });
+        return b;
+      }));
+    }, 350);
+  });
   const note = el('textarea', { rows: '4', placeholder: 'Add a note (optional). Notes are public.', maxlength: '1000' });
   note.value = p.note || '';
   const starBox = el('div');
@@ -246,7 +292,8 @@ function viewAdd() {
     if (!rating && !note.value.trim()) { msg.className = 'msg'; msg.textContent = 'Pick a star rating or write a note.'; return; }
     btn.disabled = true;
     try {
-      await saveRating({ title: title.value, artist: artist.value }, rating, note.value);
+      await saveRating({ title: title.value, artist: artist.value, art }, rating, note.value);
+      art = ''; sugg.replaceChildren();
       msg.className = 'msg ok'; msg.textContent = 'Saved.';
       title.value = ''; artist.value = ''; note.value = ''; rating = 0; drawStars();
     } catch (e) { msg.className = 'msg'; msg.textContent = friendly(e); }
@@ -254,7 +301,7 @@ function viewAdd() {
   } });
   show(el('h2', { text: 'Rate a song' }),
        el('div', { class: 'card' }, [
-         el('label', { text: 'Title' }), title, el('label', { text: 'Artist' }), artist,
+         el('label', { text: 'Title' }), title, sugg, el('label', { text: 'Artist' }), artist,
          el('label', { text: 'Your rating' }), starBox, el('div', { style: 'height:12px' }),
          el('label', { text: 'Note' }), note, btn, msg
        ]));
@@ -314,6 +361,121 @@ function viewPickName() {
     } }), msg]));
 }
 
+// Songs other people have already rated whose title starts with what was typed.
+async function suggest(text) {
+  const q = text.trim().toLowerCase();
+  if (q.length < 2) return [];
+  const snap = await getDocs(query(collection(db, 'ratings'),
+    where('titleLower', '>=', q), where('titleLower', '<=', q + '\uf8ff'), limit(25)));
+  const map = new Map();
+  snap.docs.forEach(d => {
+    const r = d.data(), m = map.get(r.key) || { title: r.title, artist: r.artist, art: r.art || '', sum: 0, n: 0, rated: true };
+    if (!m.art && r.art) m.art = r.art;
+    if (r.rating) { m.sum += r.rating; m.n++; }
+    map.set(r.key, m);
+  });
+  return [...map.values()].slice(0, 8);
+}
+
+// Song catalog lookup (Apple's public iTunes Search), so songs nobody has rated yet can still be picked.
+function catalog(text) {
+  const q = text.trim();
+  if (q.length < 3) return Promise.resolve([]);
+  return new Promise(resolve => {
+    const cb = 'cat_' + Date.now() + '_' + Math.floor(Math.random() * 1e6);
+    const s = document.createElement('script');
+    let finished = false;
+    const done = v => { if (finished) return; finished = true; delete window[cb]; s.remove(); resolve(v); };
+    window[cb] = d => done(((d && d.results) || []).filter(r => r.trackName && r.artistName)
+      .map(r => ({ title: r.trackName, artist: r.artistName, art: r.artworkUrl100 || '', sum: 0, n: 0 })));
+    s.onerror = () => done([]);
+    s.src = 'https://itunes.apple.com/search?media=music&entity=song&limit=8&term=' + encodeURIComponent(q) + '&callback=' + cb;
+    document.head.appendChild(s);
+    setTimeout(() => done([]), 5000);
+  });
+}
+// Only show cover art that comes from Apple's image servers.
+const safeArt = u => (typeof u === 'string' && /^https:\/\/[a-z0-9-]+\.mzstatic\.com\//.test(u)) ? u : '';
+
+// ---------- now playing (needs SongRater.bat running on this PC) ----------
+const LOCAL = 'http://localhost:8765';
+let cleanup = null;
+function viewNow() {
+  let song = null, rating = 0, existed = false, dirty = false, timer = null, busy = false;
+  const state = el('div', { class: 'a', text: 'Connecting to Song Rater on this PC...' });
+  const art = el('img', { class: 'art', alt: '', hidden: '' });
+  art.addEventListener('load', () => { art.hidden = false; });
+  art.addEventListener('error', () => { art.hidden = true; });
+  const title = el('div', { class: 't big' }), artist = el('div', { class: 'a' });
+  const toggle = el('button', { class: 'cbtn big', title: 'Play / pause', onclick: () => control('toggle') });
+  const ctl = el('div', { class: 'ctl' }, [
+    el('button', { class: 'cbtn', text: '⏮', title: 'Previous', onclick: () => control('prev') }), toggle,
+    el('button', { class: 'cbtn', text: '⏭', title: 'Next', onclick: () => control('next') })
+  ]);
+  const starBox = el('div');
+  const note = el('textarea', { rows: '3', maxlength: '1000', placeholder: 'Add a note (public). Saves automatically.' });
+  const msg = el('div', { class: 'msg ok' });
+  const signin = el('div', { class: 'a' }, [el('a', { href: '#/me', text: 'Sign in' }), document.createTextNode(' to rate and add notes.')]);
+  note.hidden = !me; signin.hidden = !!me;
+  const body = el('div', { hidden: '' }, [art, title, artist, ctl, starBox, note, msg, signin]);
+
+  const drawStars = () => starBox.replaceChildren(stars(rating, me ? n => { rating = n; drawStars(); persist(true); } : null));
+  // Saves the rating and note for whichever song they belong to, even if playback has moved on.
+  function persist(force) {
+    clearTimeout(timer);
+    if (!me || !song || (!force && !dirty)) return;
+    dirty = false;
+    if (!rating && !note.value.trim() && !existed) return;
+    const s = song;
+    saveRating(s, rating, note.value)
+      .then(() => { if (s === song) { existed = true; msg.className = 'msg ok'; msg.textContent = 'Saved'; } })
+      .catch(e => { msg.className = 'msg'; msg.textContent = friendly(e); });
+  }
+  note.addEventListener('input', () => {
+    dirty = true; msg.className = 'msg ok'; msg.textContent = 'Saving...';
+    clearTimeout(timer); timer = setTimeout(() => persist(), 1000);
+  });
+  note.addEventListener('blur', () => persist());
+  async function control(cmd) {
+    try { await fetch(LOCAL + '/api/control?cmd=' + cmd, { method: 'POST' }); } catch (e) {}
+    setTimeout(tick, 500);
+  }
+  async function tick() {
+    if (busy) return; busy = true;
+    try {
+      let n;
+      try { n = await (await fetch(LOCAL + '/api/now')).json(); }
+      catch (e) {
+        state.textContent = 'Song Rater is not running on this device. Start SongRater.bat on your PC to rate what is playing.';
+        body.hidden = true; return;
+      }
+      if (!n.title) { persist(); song = null; state.textContent = 'Nothing playing right now.'; body.hidden = true; return; }
+      state.textContent = n.playing ? 'Now playing' : 'Paused';
+      toggle.textContent = n.playing ? '⏸' : '▶';
+      if (!song || song.title !== n.title || song.artist !== n.artist) {
+        persist();
+        const s = song = { title: n.title, artist: n.artist || '' };
+        rating = 0; existed = false; note.value = ''; msg.textContent = '';
+        title.textContent = s.title; artist.textContent = s.artist;
+        const loadArt = () => { if (s === song) art.src = LOCAL + '/api/thumb?t=' + Date.now(); };
+        loadArt(); setTimeout(loadArt, 3000);
+        drawStars(); body.hidden = false;
+        if (me) {
+          const d = await getDoc(doc(db, 'ratings', ratingId(me.uid, keyOf(s.title, s.artist))));
+          if (d.exists() && s === song && !dirty) {
+            rating = d.data().rating; note.value = d.data().note || ''; existed = true; drawStars();
+            msg.className = 'msg ok'; msg.textContent = 'You rated this before';
+          }
+        }
+      }
+    } catch (e) { /* try again on the next tick */ }
+    finally { busy = false; }
+  }
+  const interval = setInterval(tick, 3000); tick();
+  cleanup = () => { clearInterval(interval); persist(); };
+  show(el('h2', { text: 'Now playing' }), el('div', { class: 'card center' }, [state, body]));
+}
+
 // ---------- account plumbing ----------
 let pendingName = null, needsName = false;
 async function claimName(uid, name) {
@@ -329,11 +491,12 @@ function header() {
 // ---------- router ----------
 function route() {
   const h = location.hash || '#/feed';
-  const tab = h.startsWith('#/add') ? 'add' : h.startsWith('#/me') ? 'me' : h.startsWith('#/u/') ? '' : 'feed';
+  if (cleanup) { cleanup(); cleanup = null; }
+  const tab = h.startsWith('#/now') ? 'now' : h.startsWith('#/add') ? 'add' : h.startsWith('#/me') ? 'me' : h.startsWith('#/u/') ? '' : 'feed';
   document.querySelectorAll('nav a').forEach(a => a.classList.toggle('on', a.dataset.tab === tab));
   if (needsName) return viewPickName();
   const run = h.startsWith('#/u/') ? viewUser(decodeURIComponent(h.slice(4)))
-    : tab === 'add' ? viewAdd() : tab === 'me' ? viewMe() : viewFeed();
+    : tab === 'now' ? viewNow() : tab === 'add' ? viewAdd() : tab === 'me' ? viewMe() : viewFeed();
   Promise.resolve(run).catch(e => show(el('div', { class: 'empty', text: friendly(e) })));
 }
 
@@ -358,6 +521,12 @@ if (firebaseConfig.apiKey === 'PASTE_HERE') {
     header(); route();
   });
   window.addEventListener('hashchange', route);
+  // If the PC app is running on this device, show the Now playing tab and open it first.
+  fetch(LOCAL + '/api/now').then(r => {
+    if (!r.ok) return;
+    document.getElementById('navNow').hidden = false;
+    if (!location.hash) location.hash = '#/now';
+  }).catch(() => {});
 }
 </script>
 </body>
